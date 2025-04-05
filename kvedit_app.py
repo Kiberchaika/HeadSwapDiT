@@ -10,21 +10,27 @@ import argparse
 from einops import rearrange
 from PIL import ExifTags, Image
 import torch
+import torch.nn as nn
+from torch import Tensor
 import gradio as gr
 import numpy as np
 from flux.sampling import prepare
-from flux.util import (configs, load_ae, load_clip, load_t5, print_load_warning)
+from flux.util import (configs, load_ae, print_load_warning)
 from models.kv_edit import Flux_kv_edit
-from transformers import T5EncoderModel, CLIPTextModel
+from transformers import T5EncoderModel, CLIPTextModel, T5Tokenizer, CLIPTokenizer
 from diffusers import AutoencoderKL
 
 # Imports for patching
 from safetensors.torch import load_file as load_sft
 from flux.model import Flux # Assuming Flux is the default class
 # Import the module where the function is *used* and needs patching
+from flux.modules import conditioner
 from models import kv_edit
 
-# --- Patch load_flow_model --- 
+from flux.model import Flux, FluxParams
+from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
+
+# --- Patch load_flow_model ---
 def custom_load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True, flux_cls=Flux) -> Flux:
     print("Using patched load_flow_model")
     ckpt_path = './models/FLUX.1-dev/flux1-dev.safetensors'
@@ -33,7 +39,7 @@ def custom_load_flow_model(name: str, device: str | torch.device = "cuda", hf_do
 
     # Get model params from config
     model_params = configs[name].params
-    
+
     # Initialize model
     # Use torch.device("meta") to initialize large models faster
     with torch.device("meta"):
@@ -43,18 +49,104 @@ def custom_load_flow_model(name: str, device: str | torch.device = "cuda", hf_do
     # load_sft needs device as string
     sd = load_sft(ckpt_path, device=str(device))
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
-    
+
     if missing or unexpected:
         print_load_warning(missing, unexpected)
     else:
         print("State dict loaded successfully.")
-        
+
     # Ensure model is on the correct final device (might be redundant depending on load_sft)
     model = model.to(device)
     return model
 
 # Apply the patch to the specific module where it's called
 kv_edit.load_flow_model = custom_load_flow_model
+
+
+# --- Replace HFEmbedder with new definition ---
+
+class custom_HFEmbedder(nn.Module):
+    # Explicitly accept device and torch_dtype, remove **hf_kwargs from signature if not needed elsewhere
+    def __init__(self, version: str, max_length: int, is_clip, device: torch.device | str, torch_dtype: torch.dtype = None):
+        super().__init__()
+        self.is_clip = is_clip
+        self.max_length = max_length
+        self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
+
+        # Define local paths
+        base_path = './models/FLUX.1-dev'
+        clip_tokenizer_path = os.path.join(base_path, 'tokenizer')
+        clip_model_path = os.path.join(base_path, 'text_encoder')
+        t5_tokenizer_path = os.path.join(base_path, 'tokenizer_2')
+        t5_model_path = os.path.join(base_path, 'text_encoder_2')
+
+        # Prepare kwargs for from_pretrained, only including torch_dtype if provided
+        model_kwargs = {}
+        if torch_dtype is not None:
+            model_kwargs['torch_dtype'] = torch_dtype
+
+        # Load models and tokenizers from local paths
+        if self.is_clip:
+            # Tokenizers don't typically need device or dtype
+            self.tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(clip_tokenizer_path, max_length=max_length)
+            self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(clip_model_path, **model_kwargs)
+        else:
+            self.tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(t5_tokenizer_path, max_length=max_length)
+            self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(t5_model_path, **model_kwargs)
+
+
+        # Move the loaded module to the specified device
+        self.hf_module = self.hf_module.to(device).eval().requires_grad_(False)
+        # Ensure the tokenizer doesn't hold a device reference if it accidentally got one (usually not needed)
+        # self.tokenizer = self.tokenizer # Tokenizers usually stay on CPU
+
+    def forward(self, text: list[str]) -> Tensor:
+        batch_encoding = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_length,
+            return_length=False,
+            return_overflowing_tokens=False,
+            padding="max_length",
+            return_tensors="pt",
+        )
+
+        outputs = self.hf_module(
+            input_ids=batch_encoding["input_ids"].to(self.hf_module.device),
+            attention_mask=None,
+            output_hidden_states=False,
+        )
+        return outputs[self.output_key]
+
+
+
+ 
+ 
+def custom_load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = True) -> AutoEncoder:
+    # Force loading from local path
+    ckpt_path = './models/FLUX.1-dev/ae.safetensors'
+    print(f"Loading AE from hardcoded path: {ckpt_path}")
+    # ckpt_path = configs[name].ae_path
+    # if (
+    #     ckpt_path is None
+    #     and configs[name].repo_id is not None
+    #     and configs[name].repo_ae is not None
+    #     and hf_download
+    # ):
+    #     ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_ae)
+
+    # Loading the autoencoder
+    print("Init AE")
+    with torch.device("meta" if ckpt_path is not None else device):
+        ae = AutoEncoder(configs[name].ae_params)
+
+    if ckpt_path is not None:
+        sd = load_sft(ckpt_path, device=str(device))
+        missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
+        print_load_warning(missing, unexpected)
+    return ae
+
+
 
 @dataclass
 class SamplingOptions:
@@ -83,16 +175,16 @@ class FluxEditor_kv_demo:
 
         self.output_dir = 'regress_result'
 
-        # self.t5 = load_t5(self.device, max_length=256 if self.name == "flux-schnell" else 512, )
-        t5_model_path = './models/FLUX.1-dev/text_encoder_2'
-        self.t5 = T5EncoderModel.from_pretrained(t5_model_path).to(self.device)
-        clip_model_path = './models/FLUX.1-dev/text_encoder'
-        self.clip = CLIPTextModel.from_pretrained(clip_model_path).to(self.device)
+        # Instantiate custom_HFEmbedder directly
+        # The .to(self.device) call is removed as the class handles device placement
+        t5_max_length = 256 if self.is_schnell else 512
+        self.t5 = custom_HFEmbedder(version="local", max_length=t5_max_length, is_clip=False, device=self.device, torch_dtype=torch.bfloat16)
+        self.clip = custom_HFEmbedder(version="local", max_length=77, is_clip=True, device=self.device, torch_dtype=torch.bfloat16)
         self.model = Flux_kv_edit(device="cpu" if self.offload else self.device, name=self.name)
-        ae_model_path = './models/FLUX.1-dev/vae'
-        self.ae = AutoencoderKL.from_pretrained(ae_model_path).to("cpu" if self.offload else self.device)
+        self.ae = custom_load_ae(self.name, device="cpu" if self.offload else self.device)
 
-        self.t5.eval()
+
+        self.t5.eval() # Eval is handled inside custom_HFEmbedder now, but doesn't hurt to keep
         self.clip.eval()
         self.ae.eval()
         self.model.eval()
@@ -101,12 +193,12 @@ class FluxEditor_kv_demo:
             self.model.cpu()
             torch.cuda.empty_cache()
             self.ae.encoder.to(self.device)
-        
+
     @torch.inference_mode()
     def inverse(self, brush_canvas,
-             source_prompt, target_prompt, 
-             inversion_num_steps, denoise_num_steps, 
-             skip_step, 
+             source_prompt, target_prompt,
+             inversion_num_steps, denoise_num_steps,
+             skip_step,
              inversion_guidance, denoise_guidance,seed,
              re_init, attn_mask
              ):
@@ -119,10 +211,10 @@ class FluxEditor_kv_demo:
             for key in key_list:
                 del self.info['feature'][key]
         self.info = {}
-        
+
         rgba_init_image = brush_canvas["background"]
         init_image = rgba_init_image[:,:,:3]
-        shape = init_image.shape        
+        shape = init_image.shape
         height = shape[0] if shape[0] % 16 == 0 else shape[0] - shape[0] % 16
         width = shape[1] if shape[1] % 16 == 0 else shape[1] - shape[1] % 16
         init_image = init_image[:height, :width, :]
@@ -146,16 +238,16 @@ class FluxEditor_kv_demo:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(opts.seed)
         torch.cuda.empty_cache()
-        
+
         if opts.attn_mask:
             rgba_mask = brush_canvas["layers"][0][:height, :width, :]
             mask = rgba_mask[:,:,3]/255
             mask = mask.astype(int)
-        
+
             mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(torch.bfloat16).to(self.device)
         else:
             mask = None
-        
+
         self.init_image = self.encode(init_image, self.device).to(self.device)
 
         t0 = time.perf_counter()
@@ -167,37 +259,37 @@ class FluxEditor_kv_demo:
 
         with torch.no_grad():
             inp = prepare(self.t5, self.clip,self.init_image, prompt=opts.source_prompt)
-        
+
         if self.offload:
             self.t5, self.clip = self.t5.cpu(), self.clip.cpu()
             torch.cuda.empty_cache()
             self.model = self.model.to(self.device)
         self.z0,self.zt,self.info = self.model.inverse(inp,mask,opts)
-        
+
         if self.offload:
             self.model.cpu()
             torch.cuda.empty_cache()
-            
+
         t1 = time.perf_counter()
         print(f"inversion Done in {t1 - t0:.1f}s.")
         return None
 
-        
-        
+
+
     @torch.inference_mode()
     def edit(self, brush_canvas,
-             source_prompt, target_prompt, 
-             inversion_num_steps, denoise_num_steps, 
-             skip_step, 
+             source_prompt, target_prompt,
+             inversion_num_steps, denoise_num_steps,
+             skip_step,
              inversion_guidance, denoise_guidance,seed,
              re_init, attn_mask,attn_scale
              ):
-        
+
         torch.cuda.empty_cache()
-        
+
         rgba_init_image = brush_canvas["background"]
         init_image = rgba_init_image[:,:,:3]
-        shape = init_image.shape        
+        shape = init_image.shape
         height = shape[0] if shape[0] % 16 == 0 else shape[0] - shape[0] % 16
         width = shape[1] if shape[1] % 16 == 0 else shape[1] - shape[1] % 16
         init_image = init_image[:height, :width, :]
@@ -206,11 +298,11 @@ class FluxEditor_kv_demo:
         rgba_mask = brush_canvas["layers"][0][:height, :width, :]
         mask = rgba_mask[:,:,3]/255
         mask = mask.astype(int)
-        
+
         rgba_mask[:,:,3] = rgba_mask[:,:,3]//2
         masked_image = Image.alpha_composite(Image.fromarray(rgba_init_image, 'RGBA'), Image.fromarray(rgba_mask, 'RGBA'))
         mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(torch.bfloat16).to(self.device)
-        
+
         seed = int(seed)
         if seed == -1:
             seed = torch.randint(0, 2**32, (1,)).item()
@@ -230,10 +322,10 @@ class FluxEditor_kv_demo:
             attn_scale=attn_scale
         )
         if self.offload:
-            
+
             torch.cuda.empty_cache()
             self.t5, self.clip = self.t5.to(self.device), self.clip.to(self.device)
-            
+
         torch.manual_seed(opts.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(opts.seed)
@@ -247,21 +339,21 @@ class FluxEditor_kv_demo:
             self.t5, self.clip = self.t5.cpu(), self.clip.cpu()
             torch.cuda.empty_cache()
             self.model = self.model.to(self.device)
-            
+
         x = self.model.denoise(self.z0,self.zt,inp_target,mask,opts,self.info)
-        
+
         if self.offload:
             self.model.cpu()
             torch.cuda.empty_cache()
             self.ae.decoder.to(x.device)
-            
+
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             x = self.ae.decode(x.to(self.device))
-        
+
         x = x.clamp(-1, 1)
         x = x.float().cpu()
         x = rearrange(x[0], "c h w -> h w c")
-        
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -275,68 +367,68 @@ class FluxEditor_kv_demo:
                 idx = max(int(fn.split("_")[-1].split(".")[0]) for fn in fns) + 1
             else:
                 idx = 0
-        
+
         fn = output_name.format(idx=idx)
-    
+
         img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
         exif_data = Image.Exif()
         exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"
         exif_data[ExifTags.Base.Make] = "Black Forest Labs"
         exif_data[ExifTags.Base.Model] = self.name
-    
+
         exif_data[ExifTags.Base.ImageDescription] = target_prompt
         img.save(fn, exif=exif_data, quality=95, subsampling=0)
         masked_image.save(fn.replace(".jpg", "_mask.png"),  format='PNG')
         t1 = time.perf_counter()
         print(f"Done in {t1 - t0:.1f}s. Saving {fn}")
-        
+
         print("End Edit")
         return img
 
-    
+
     @torch.inference_mode()
     def encode(self,init_image, torch_device):
         init_image = torch.from_numpy(init_image).permute(2, 0, 1).float() / 127.5 - 1
-        init_image = init_image.unsqueeze(0) 
+        init_image = init_image.unsqueeze(0)
         init_image = init_image.to(torch_device)
         self.ae.encoder.to(torch_device)
-        
+
         init_image = self.ae.encode(init_image).to(torch.bfloat16)
         return init_image
-    
+
 def create_demo(model_name: str):
     editor = FluxEditor_kv_demo(args)
     is_schnell = model_name == "flux-schnell"
-    
+
     title = r"""
         <h1 align="center">🎨 KV-Edit: Training-Free Image Editing for Precise Background Preservation</h1>
         """
-        
+
     description = r"""
         <b>Official 🤗 Gradio demo</b> for <a href='https://github.com/Xilluill/KV-Edit' target='_blank'><b>KV-Edit: Training-Free Image Editing for Precise Background Preservation</b></a>.<br>
-    
+
         💫💫 <b>Here is editing steps:</b> <br>
         1️⃣ Upload your image that needs to be edited. <br>
         2️⃣ Fill in your source prompt and click the "Inverse" button to perform image inversion. <br>
         3️⃣ Use the brush tool to draw your mask area. <br>
         4️⃣ Fill in your target prompt, then adjust the hyperparameters. <br>
         5️⃣ Click the "Edit" button to generate your edited image! <br>
-        
+
         🔔🔔 [<b>Important</b>] Less skip steps, "re_init" and "attn_mask"  will enhance the editing performance, making the results more aligned with your text but may lead to discontinuous images.  <br>
         If you fail because of these three, we recommend trying to increase "attn_scale" to increase attention between mask and background.<br>
         """
     article = r"""
-    If our work is helpful, please help to ⭐ the <a href='https://github.com/Xilluill/KV-Edit' target='_blank'>Github Repo</a>. Thanks! 
+    If our work is helpful, please help to ⭐ the <a href='https://github.com/Xilluill/KV-Edit' target='_blank'>Github Repo</a>. Thanks!
     """
 
     badge = r"""
     [![GitHub Stars](https://img.shields.io/github/stars/Xilluill/KV-Edit)](https://github.com/Xilluill/KV-Edit)
     """
-    
+
     with gr.Blocks() as demo:
         gr.HTML(title)
         gr.Markdown(description)
-        
+
         with gr.Row():
             with gr.Column():
                 source_prompt = gr.Textbox(label="Source Prompt", value='' )
@@ -344,17 +436,17 @@ def create_demo(model_name: str):
                 target_prompt = gr.Textbox(label="Target Prompt", value='' )
                 denoise_num_steps = gr.Slider(1, 50, 28, step=1, label="Number of denoise steps")
                 brush_canvas = gr.ImageEditor(label="Brush Canvas",
-                                                sources=('upload'), 
+                                                sources=('upload'),
                                                 brush=gr.Brush(colors=["#ff0000"],color_mode='fixed'),
                                                 interactive=True,
                                                 transforms=[],
                                                 container=True,
                                                 format='png',scale=1)
-                
+
                 inv_btn = gr.Button("inverse")
                 edit_btn = gr.Button("edit")
-                
-                
+
+
             with gr.Column():
                 with gr.Accordion("Advanced Options", open=True):
 
@@ -367,15 +459,15 @@ def create_demo(model_name: str):
                         re_init = gr.Checkbox(label="re_init", value=False)
                         attn_mask = gr.Checkbox(label="attn_mask", value=False)
 
-                
+
                 output_image = gr.Image(label="Generated Image")
                 gr.Markdown(article)
         inv_btn.click(
             fn=editor.inverse,
             inputs=[brush_canvas,
-                    source_prompt, target_prompt, 
-                    inversion_num_steps, denoise_num_steps, 
-                    skip_step, 
+                    source_prompt, target_prompt,
+                    inversion_num_steps, denoise_num_steps,
+                    skip_step,
                     inversion_guidance,
                     denoise_guidance,seed,
                     re_init, attn_mask
@@ -385,9 +477,9 @@ def create_demo(model_name: str):
         edit_btn.click(
             fn=editor.edit,
             inputs=[brush_canvas,
-                    source_prompt, target_prompt, 
-                    inversion_num_steps, denoise_num_steps, 
-                    skip_step, 
+                    source_prompt, target_prompt,
+                    inversion_num_steps, denoise_num_steps,
+                    skip_step,
                     inversion_guidance,
                     denoise_guidance,seed,
                     re_init, attn_mask,attn_scale
@@ -407,5 +499,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     demo = create_demo(args.name)
-    
-    demo.launch(server_name='0.0.0.0', share=True, server_port=args.port)
+
+    demo.launch(server_name='0.0.0.0', share=True)
