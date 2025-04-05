@@ -13,8 +13,48 @@ import torch
 import gradio as gr
 import numpy as np
 from flux.sampling import prepare
-from flux.util import (configs, load_ae, load_clip, load_t5)
+from flux.util import (configs, load_ae, load_clip, load_t5, print_load_warning)
 from models.kv_edit import Flux_kv_edit
+from transformers import T5EncoderModel, CLIPTextModel
+from diffusers import AutoencoderKL
+
+# Imports for patching
+from safetensors.torch import load_file as load_sft
+from flux.model import Flux # Assuming Flux is the default class
+# Import the module where the function is *used* and needs patching
+from models import kv_edit
+
+# --- Patch load_flow_model --- 
+def custom_load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True, flux_cls=Flux) -> Flux:
+    print("Using patched load_flow_model")
+    ckpt_path = './models/FLUX.1-dev/flux1-dev.safetensors'
+    device = torch.device(device)
+    print(f"Loading model {name} from hardcoded path: {ckpt_path}")
+
+    # Get model params from config
+    model_params = configs[name].params
+    
+    # Initialize model
+    # Use torch.device("meta") to initialize large models faster
+    with torch.device("meta"):
+        model = flux_cls(model_params).to(torch.bfloat16)
+
+    print(f"Loading state dict from {ckpt_path} onto device {device}")
+    # load_sft needs device as string
+    sd = load_sft(ckpt_path, device=str(device))
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    
+    if missing or unexpected:
+        print_load_warning(missing, unexpected)
+    else:
+        print("State dict loaded successfully.")
+        
+    # Ensure model is on the correct final device (might be redundant depending on load_sft)
+    model = model.to(device)
+    return model
+
+# Apply the patch to the specific module where it's called
+kv_edit.load_flow_model = custom_load_flow_model
 
 @dataclass
 class SamplingOptions:
@@ -43,10 +83,14 @@ class FluxEditor_kv_demo:
 
         self.output_dir = 'regress_result'
 
-        self.t5 = load_t5(self.device, max_length=256 if self.name == "flux-schnell" else 512)
-        self.clip = load_clip(self.device)
+        # self.t5 = load_t5(self.device, max_length=256 if self.name == "flux-schnell" else 512, )
+        t5_model_path = './models/FLUX.1-dev/text_encoder_2'
+        self.t5 = T5EncoderModel.from_pretrained(t5_model_path).to(self.device)
+        clip_model_path = './models/FLUX.1-dev/text_encoder'
+        self.clip = CLIPTextModel.from_pretrained(clip_model_path).to(self.device)
         self.model = Flux_kv_edit(device="cpu" if self.offload else self.device, name=self.name)
-        self.ae = load_ae(self.name, device="cpu" if self.offload else self.device)
+        ae_model_path = './models/FLUX.1-dev/vae'
+        self.ae = AutoencoderKL.from_pretrained(ae_model_path).to("cpu" if self.offload else self.device)
 
         self.t5.eval()
         self.clip.eval()
@@ -362,11 +406,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=41032)
     args = parser.parse_args()
 
-    # --- MODIFICATION ---
-    # Update model paths based on parsed arguments before creating the editor
-    update_model_paths(args.name, base_path="./models/KVEdit", flux_specific_path="./models/FLUX.1-dev")
-    # --- END MODIFICATION ---
-
     demo = create_demo(args.name)
     
-    demo.launch(server_name='0.0.0.0', share=args.share, server_port=args.port)
+    demo.launch(server_name='0.0.0.0', share=True, server_port=args.port)
