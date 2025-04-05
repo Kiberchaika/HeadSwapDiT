@@ -3,7 +3,7 @@
     "configurations": [
         {
             "name": "InfiniteYou: Debug app.py",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/InfiniteYou/app.py",
             "console": "integratedTerminal",
@@ -12,7 +12,7 @@
         },
         {
             "name": "InfiniteYou: Debug test.py",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/InfiniteYou/test.py",
             "console": "integratedTerminal",
@@ -21,7 +21,7 @@
         },
         {
             "name": "KV-Edit: Debug gradio_kv_edit.py",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/KV-Edit/gradio_kv_edit.py",
             "console": "integratedTerminal",
@@ -30,7 +30,7 @@
         },
         {
             "name": "KV-Edit: Debug gradio_kv_edit_gpu.py",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/KV-Edit/gradio_kv_edit_gpu.py",
             "console": "integratedTerminal",
