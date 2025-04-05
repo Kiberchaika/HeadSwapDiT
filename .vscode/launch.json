@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "InfiniteYou: Debug app.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfiniteYou/app.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/InfiniteYou"
+        },
+        {
+            "name": "InfiniteYou: Debug test.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfiniteYou/test.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/InfiniteYou"
+        },
+        {
+            "name": "KV-Edit: Debug gradio_kv_edit.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/KV-Edit/gradio_kv_edit.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/KV-Edit"
+        },
+        {
+            "name": "KV-Edit: Debug gradio_kv_edit_gpu.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/KV-Edit/gradio_kv_edit_gpu.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/KV-Edit"
+        }
+    ]
+} 

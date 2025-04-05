@@ -1,0 +1,6 @@
+[submodule "KV-Edit"]
+	path = KV-Edit
+	url = https://github.com/Xilluill/KV-Edit
+[submodule "InfiniteYou"]
+	path = InfiniteYou
+	url = https://github.com/bytedance/InfiniteYou
