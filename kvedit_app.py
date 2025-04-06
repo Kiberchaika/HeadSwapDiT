@@ -15,7 +15,7 @@ from torch import Tensor
 import gradio as gr
 import numpy as np
 from flux.sampling import prepare
-from flux.util import (configs, load_ae, print_load_warning)
+from flux.util import (configs, print_load_warning)
 from models.kv_edit import Flux_kv_edit
 from transformers import T5EncoderModel, CLIPTextModel, T5Tokenizer, CLIPTokenizer
 from diffusers import AutoencoderKL
@@ -23,12 +23,8 @@ from diffusers import AutoencoderKL
 # Imports for patching
 from safetensors.torch import load_file as load_sft
 from flux.model import Flux # Assuming Flux is the default class
-# Import the module where the function is *used* and needs patching
-from flux.modules import conditioner
+from flux.modules.autoencoder import AutoEncoder
 from models import kv_edit
-
-from flux.model import Flux, FluxParams
-from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
 
 # --- Patch load_flow_model ---
 def custom_load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True, flux_cls=Flux) -> Flux:
