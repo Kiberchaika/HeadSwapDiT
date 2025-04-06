@@ -51,5 +51,5 @@
 ## Подмодули
 
 Этот проект использует следующие подмодули:
-*   [InfiniteYou](https://github.com/username/InfiniteYou) *(Обновите URL)*
-*   [KV-Edit](https://github.com/username/KV-Edit) *(Обновите URL)*
+*   [InfiniteYou](https://github.com/bytedance/InfiniteYouu)
+*   [KV-Edit](https://github.com/Xilluill/KV-Edit) 
