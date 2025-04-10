@@ -1,5 +1,5 @@
 import sys
-sys.path.append('InfiniteYou')
+sys.path.append('./InfiniteYou')
 
 import gradio as gr
 import pillow_avif

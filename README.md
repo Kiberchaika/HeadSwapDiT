@@ -26,7 +26,15 @@
     source venv/bin/activate  # Windows: venv\Scripts\activate
     pip install -r requirements.txt
     ```
-4.  **Настройка модели (InfiniteYou - FLUX.1-dev):**
+4.  **Настройка Git (опционально):**
+    Если вы планируете вносить вклад в проект, настройте свое имя пользователя и email для Git:
+    ```bash
+    git config --global user.name "Ваше Имя"
+    git config --global user.email "ваш_email@example.com"
+    ```
+    *Замените `"Ваше Имя"` и `"ваш_email@example.com"` на ваши реальные данные.*
+
+5.  **Настройка модели (InfiniteYou - FLUX.1-dev):**
     *   **Доступ:** Запросите доступ на [huggingface.co/black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev).
     *   **Аутентификация:** Войдите через CLI с помощью `huggingface-cli login`, используя токен чтения ([сгенерировать здесь](https://huggingface.co/settings/tokens)).
     *   **Альтернатива:** Скачайте файлы модели вручную после получения доступа и поместите их в ожидаемый каталог (например, `./models/FLUX.1-dev`).

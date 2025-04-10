@@ -2,6 +2,15 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "InfiniteYou (orig)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfiniteYou/app.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/InfiniteYou",
+            "justMyCode": true
+        },
+        {
             "name": "InfiniteYou",
             "type": "debugpy",
             "request": "launch",
